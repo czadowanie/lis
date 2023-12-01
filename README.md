@@ -25,5 +25,5 @@ You only need `zig-0.11`.
 ```
 git clone --depth=1 https://github.com/czadowanie/lis
 cd lis
-zig build install -Dptimize=ReleaseFast --prefix $HOME/.local
+zig build install -Doptimize=ReleaseFast --prefix $HOME/.local
 ```
