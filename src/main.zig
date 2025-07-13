@@ -5,7 +5,7 @@ const fs = std.fs;
 fn discoverDevices(alloc: mem.Allocator) ![][]const u8 {
     var out = std.ArrayList([]const u8).init(alloc);
 
-    var backlight_dir = try fs.openIterableDirAbsolute("/sys/class/backlight", .{});
+    var backlight_dir = try fs.openDirAbsolute("/sys/class/backlight", .{ .iterate = true });
     defer backlight_dir.close();
 
     var iter = backlight_dir.iterate();
@@ -48,35 +48,58 @@ const help_msg =
 ;
 
 fn showHelp() !void {
-    _ = try std.io.getStdErr().write(help_msg);
+    _ = try std.fs.File.stderr().write(help_msg);
 }
 
-fn displayDeviceBrightness(alloc: mem.Allocator, name: []const u8) !void {
+fn readValue(arena: mem.Allocator, device: []const u8, value_name: []const u8) !u32 {
     const backlight_dir = try std.fs.openDirAbsolute("/sys/class/backlight", .{});
-    const device_dir = try backlight_dir.openDir(name, .{});
-    const file = try device_dir.openFile("actual_brightness", .{});
+    const device_dir = try backlight_dir.openDir(device, .{});
+    const file = try device_dir.openFile(value_name, .{});
     defer file.close();
+    const content = try file.readToEndAlloc(arena, 128);
+    defer arena.free(content);
 
-    const reader = file.reader();
-    const content = try reader.readAllAlloc(alloc, 128);
+    std.log.debug("{s}.{s} = '{s}'", .{ device, value_name, content });
 
-    const stdout = std.io.getStdOut();
-    _ = try stdout.write(content);
+    return try std.fmt.parseInt(u32, content[0 .. content.len - 1], 10);
 }
 
-fn setDeviceBrightness(name: []const u8, value: u32) !void {
+fn displayDeviceBrightness(alloc: mem.Allocator, device: []const u8) !void {
+    const stdout = std.fs.File.stdout();
+    const value = try readValue(alloc, device, "actual_brightness");
+    _ = try stdout.deprecatedWriter().print("{d}\n", .{value});
+}
+
+fn lerp(a: f32, b: f32, t: f32) f32 {
+    return a + (b - a) * t;
+}
+
+fn invLerp(a: f32, b: f32, t: f32) f32 {
+    return (t - a) / (b - a);
+}
+
+fn remap(a: f32, b: f32, c: f32, d: f32, t: f32) f32 {
+    const rel = invLerp(a, b, t);
+    return lerp(c, d, rel);
+}
+
+fn setDeviceBrightness(arena: mem.Allocator, name: []const u8, value: u32) !void {
     const backlight_dir = try std.fs.openDirAbsolute("/sys/class/backlight/", .{});
     const device_dir = try backlight_dir.openDir(name, .{});
 
+    const max_brightness = try readValue(arena, name, "max_brightness");
+    const remapped = remap(0, 255, 0, @floatFromInt(max_brightness), @floatFromInt(value));
+    std.log.debug("orig = {d}, remapped = {d}", .{ value, @as(u32, @intFromFloat(remapped)) });
+
     const file = try device_dir.openFile("brightness", .{ .mode = .write_only });
     defer file.close();
-    try file.writer().print("{d}", .{value});
+    try file.deprecatedWriter().print("{d}", .{remapped});
 }
 
 pub fn main() !void {
     var buf: [1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
-    var alloc = fba.allocator();
+    const alloc = fba.allocator();
 
     const args = try std.process.argsAlloc(alloc);
     switch (args.len) {
@@ -89,9 +112,9 @@ pub fn main() !void {
                 try showHelp();
             } else if (mem.eql(u8, args[1], "list")) {
                 const devices = try discoverDevices(alloc);
-                var stdout = std.io.getStdOut();
+                var stdout = std.fs.File.stdout();
                 for (devices) |dev| {
-                    try stdout.writer().print("{s}\n", .{dev});
+                    try stdout.deprecatedWriter().print("{s}\n", .{dev});
                 }
             } else {
                 const val_idx: usize = if (args.len == 3) 2 else 1;
@@ -99,19 +122,19 @@ pub fn main() !void {
                 const val: u32 = if (args[val_idx][0] == 'h')
                     std.fmt.parseInt(u32, args[val_idx][1..], 16) catch {
                         try showHelp();
-                        std.os.exit(1);
+                        std.posix.exit(1);
                         return;
                     }
                 else
                     std.fmt.parseInt(u32, args[val_idx], 10) catch {
                         try showHelp();
-                        std.os.exit(1);
+                        std.posix.exit(1);
                         return;
                     };
 
                 const device = if (args.len == 3) args[1] else try getDefaultDeviceName(alloc);
 
-                setDeviceBrightness(device, val) catch |err| switch (err) {
+                setDeviceBrightness(alloc, device, val) catch |err| switch (err) {
                     error.FileNotFound => {
                         std.log.err("device not found, use \"lis list\" to enumerate devices", .{});
                     },
@@ -121,7 +144,7 @@ pub fn main() !void {
         },
         else => {
             try showHelp();
-            std.os.exit(1);
+            std.posix.exit(1);
         },
     }
 }
